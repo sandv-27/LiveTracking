@@ -1,0 +1,25 @@
+//import org.gradle.api.tasks.Delete
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// Set custom build directory
+def newBuildDir = new File(rootProject.projectDir, "../build")
+rootProject.buildDir = newBuildDir
+
+subprojects {
+    buildDir = new File(newBuildDir, name)
+}
+
+project(":app").afterEvaluate {
+    // You can place additional configuration for :app here if needed
+}
+
+// Clean task
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
