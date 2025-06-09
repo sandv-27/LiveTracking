@@ -4,27 +4,63 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:firebase_database/firebase_database.dart';
+import 'package:uuid/uuid.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-const String openRouteServiceApiKey =
-    '5b3ce3597851110001cf6248e9dccc78e1b348eda70807ab17839d08'; // Replace this!
+const String openRouteServiceApiKey = 'YOUR_ORS_API_KEY_HERE';
 
 class GoogleMapPage extends StatefulWidget {
+  const GoogleMapPage({super.key});
+
   @override
   _GoogleMapPageState createState() => _GoogleMapPageState();
 }
 
 class _GoogleMapPageState extends State<GoogleMapPage> {
-  Completer<GoogleMapController> _controller = Completer();
+  late final String _deviceId;
+  bool _isLoading = true;
+
+  final Completer<GoogleMapController> _controller = Completer();
   GoogleMapController? _mapController;
   final Set<Marker> _markers = {};
   final Set<Polyline> _polylines = {};
   LatLng? _currentPosition;
   LatLng? _destinationPosition;
 
+  final DatabaseReference _historyRef = FirebaseDatabase.instance.ref("tracks");
+  final DatabaseReference _lastRef = FirebaseDatabase.instance.ref(
+    "lastLocations",
+  );
+
+  StreamSubscription<Position>? _positionSubscription;
+  StreamSubscription<DatabaseEvent>? _lastRefSubscription;
+
   @override
   void initState() {
     super.initState();
-    _checkLocationPermission();
+    _initDeviceIdAndSetup();
+  }
+
+  Future<void> _initDeviceIdAndSetup() async {
+    _deviceId = await _getDeviceId();
+    // Now _deviceId is ready — start permission check and Firebase listeners
+    await _checkLocationPermission();
+    _startListeningToOtherUsers();
+
+    setState(() {
+      _isLoading = false;
+    });
+  }
+
+  Future<String> _getDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    var id = prefs.getString('deviceId');
+    if (id == null) {
+      id = const Uuid().v4();
+      await prefs.setString('deviceId', id);
+    }
+    return id;
   }
 
   Future<void> _checkLocationPermission() async {
@@ -46,7 +82,7 @@ class _GoogleMapPageState extends State<GoogleMapPage> {
   }
 
   void _startLocationUpdates() {
-    Geolocator.getPositionStream(
+    _positionSubscription = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
         distanceFilter: 10,
@@ -57,6 +93,15 @@ class _GoogleMapPageState extends State<GoogleMapPage> {
         _currentPosition = newPosition;
         _updateUserMarker();
       });
+
+      final pointData = {
+        'lat': newPosition.latitude,
+        'lng': newPosition.longitude,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      };
+
+      _historyRef.child(_deviceId).push().set(pointData);
+      _lastRef.child(_deviceId).set(pointData);
 
       if (_destinationPosition != null) {
         await _fetchRouteFromOpenRouteService(
@@ -71,27 +116,50 @@ class _GoogleMapPageState extends State<GoogleMapPage> {
 
   void _updateUserMarker() {
     if (_currentPosition == null) return;
-    _markers.removeWhere((m) => m.markerId == MarkerId('user'));
+    _markers.removeWhere((m) => m.markerId.value == 'user');
     _markers.add(
       Marker(
         markerId: MarkerId('user'),
         position: _currentPosition!,
         icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-        infoWindow: InfoWindow(title: 'You'),
+        infoWindow: const InfoWindow(title: 'You'),
       ),
     );
   }
 
-  void _addDestinationMarker(LatLng position) {
-    _markers.removeWhere((m) => m.markerId == MarkerId('destination'));
-    _markers.add(
-      Marker(
-        markerId: MarkerId('destination'),
-        position: position,
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-        infoWindow: InfoWindow(title: 'Destination'),
-      ),
-    );
+  void _startListeningToOtherUsers() {
+    _lastRefSubscription = _lastRef.onValue.listen((event) {
+      final data = event.snapshot.value as Map<dynamic, dynamic>?;
+
+      if (data != null) {
+        setState(() {
+          _markers.removeWhere(
+            (m) =>
+                m.markerId.value != 'user' && m.markerId.value != 'destination',
+          );
+
+          data.forEach((deviceId, value) {
+            if (deviceId == _deviceId) return; // skip self
+            if (value is Map) {
+              final lat = value['lat'];
+              final lng = value['lng'];
+              if (lat != null && lng != null) {
+                _markers.add(
+                  Marker(
+                    markerId: MarkerId(deviceId),
+                    position: LatLng(lat, lng),
+                    icon: BitmapDescriptor.defaultMarkerWithHue(
+                      BitmapDescriptor.hueGreen,
+                    ),
+                    infoWindow: InfoWindow(title: 'User $deviceId'),
+                  ),
+                );
+              }
+            }
+          });
+        });
+      }
+    });
   }
 
   Future<void> _fetchRouteFromOpenRouteService(
@@ -129,7 +197,7 @@ class _GoogleMapPageState extends State<GoogleMapPage> {
         _polylines.clear();
         _polylines.add(
           Polyline(
-            polylineId: PolylineId('route'),
+            polylineId: const PolylineId('route'),
             points: polylineCoords,
             color: Colors.blue,
             width: 5,
@@ -152,10 +220,12 @@ class _GoogleMapPageState extends State<GoogleMapPage> {
       context: context,
       builder:
           (context) => AlertDialog(
-            title: Text("Enter Destination"),
+            title: const Text("Enter Destination"),
             content: TextField(
               controller: controller,
-              decoration: InputDecoration(hintText: "Type destination address"),
+              decoration: const InputDecoration(
+                hintText: "Type destination address",
+              ),
             ),
             actions: [
               TextButton(
@@ -203,30 +273,54 @@ class _GoogleMapPageState extends State<GoogleMapPage> {
                     }
                   }
                 },
-                child: Text("Search"),
+                child: const Text("Search"),
               ),
             ],
           ),
     );
   }
 
+  void _addDestinationMarker(LatLng position) {
+    _markers.removeWhere((m) => m.markerId == MarkerId('destination'));
+    _markers.add(
+      Marker(
+        markerId: const MarkerId('destination'),
+        position: position,
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+        infoWindow: const InfoWindow(title: 'Destination'),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _positionSubscription?.cancel();
+    _lastRefSubscription?.cancel();
+    _mapController?.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('Search & Navigate'),
+        title: const Text('Search & Navigate'),
         actions: [
-          IconButton(icon: Icon(Icons.search), onPressed: _handleSearch),
+          IconButton(icon: const Icon(Icons.search), onPressed: _handleSearch),
         ],
       ),
       body: GoogleMap(
-        initialCameraPosition: CameraPosition(
+        initialCameraPosition: const CameraPosition(
           target: LatLng(10.0150, 76.2300),
           zoom: 14,
         ),
         myLocationEnabled: true,
         myLocationButtonEnabled: true,
-        onMapCreated: (GoogleMapController controller) {
+        onMapCreated: (controller) {
           _controller.complete(controller);
           _mapController = controller;
         },

@@ -1,4 +1,12 @@
-//import org.gradle.api.tasks.Delete
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.google.gms:google-services:4.4.0'
+    }
+}
 
 allprojects {
     repositories {
@@ -7,7 +15,7 @@ allprojects {
     }
 }
 
-// Set custom build directory
+// Optional: custom build output folder
 def newBuildDir = new File(rootProject.projectDir, "../build")
 rootProject.buildDir = newBuildDir
 
@@ -16,7 +24,7 @@ subprojects {
 }
 
 project(":app").afterEvaluate {
-    // You can place additional configuration for :app here if needed
+    // Additional config for :app
 }
 
 // Clean task
